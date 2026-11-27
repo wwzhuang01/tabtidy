@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabTidy</title>
+  <link rel="icon" href="icons/icon32.png">
+  <link rel="stylesheet" href="src/sidepanel.css">
+  <script type="module" src="src/sidepanel.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="masthead">
+      <div class="brand">
+        <img src="icons/icon48.png" width="36" height="36" alt="">
+        <div>
+          <h1>TabTidy</h1>
+          <p class="open-count" id="open-count">正在读取标签页…</p>
+        </div>
+      </div>
+      <div id="header-actions" class="header-actions"></div>
+    </div>
+    <nav class="nav" id="navigation" aria-label="标签页管理">
+      <button type="button" data-view="tabs" aria-current="page">标签页</button>
+      <button type="button" data-view="duplicates">重复<span class="nav-count tone-warning" id="duplicate-count" hidden></span></button>
+      <button type="button" data-view="corral">回收站<span class="nav-count" id="corral-count" hidden></span></button>
+      <button type="button" data-view="settings">设置</button>
+    </nav>
+    <div class="search-area" id="search-area">
+      <div class="search-box" id="search-box">
+        <input id="search" type="search" placeholder="搜索标题、网址或分组名..." aria-label="搜索标题、网址或分组名" autocomplete="off" spellcheck="false" autofocus>
+        <kbd aria-hidden="true">/</kbd>
+      </div>
+    </div>
+  </header>
+  <main id="content" aria-label="标签页" aria-busy="true"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

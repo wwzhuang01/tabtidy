@@ -1,0 +1,11 @@
+{
+  "name": "tabtidy",
+  "version": "1.0.0",
+  "description": "Chrome Side Panel extension for Tab Group navigation, smart deduplication, and tiered auto-sleep & archiving.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
