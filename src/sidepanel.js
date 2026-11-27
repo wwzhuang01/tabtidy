@@ -1,4 +1,5 @@
 import { searchCorral } from './core/corral.js';
+import { resolveLanguage, translate } from './core/i18n.js';
 import { groupKey, isGrouped, lockReason } from './core/locks.js';
 
 const icons = {
@@ -24,11 +25,16 @@ const icons = {
 const $ = id => document.getElementById(id);
 const main = $('content');
 const search = $('search');
-const relative = new Intl.RelativeTimeFormat('zh-CN', { numeric: 'always' });
+const browserLang = chrome.i18n?.getUILanguage?.() || navigator.language || 'en';
+const relativeFormatters = {
+  zh: new Intl.RelativeTimeFormat('zh-CN', { numeric: 'always' }),
+  en: new Intl.RelativeTimeFormat('en', { numeric: 'always' }),
+};
 const disclosure = new Map();
 const pendingSettings = new Set();
 const windowId = (await chrome.windows.getCurrent().catch(() => null))?.id;
-const views = { tabs: '标签页', duplicates: '重复', corral: '回收站', settings: '设置' };
+const viewKeys = { tabs: 'viewTabs', duplicates: 'viewDuplicates', corral: 'viewCorral', settings: 'viewSettings' };
+let lang = resolveLanguage('auto', browserLang);
 let state;
 let view = 'tabs';
 let confirmClear = false;
@@ -36,6 +42,21 @@ let revision = 0;
 let refreshTimer;
 let toastTimer;
 let busy = false;
+
+function t(key, params) {
+  return translate(lang, key, params);
+}
+
+function applyChromeCopy() {
+  document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en';
+  $('navigation').setAttribute('aria-label', t('navAria'));
+  for (const node of document.querySelectorAll('[data-view-label]')) {
+    node.textContent = t(viewKeys[node.dataset.viewLabel]);
+  }
+  search.placeholder = t('searchPlaceholder');
+  search.setAttribute('aria-label', t('searchAria'));
+  if (!state) $('open-count').textContent = t('loadingTabs');
+}
 
 function element(tag, classes, ...children) {
   const node = document.createElement(tag);
@@ -76,8 +97,8 @@ function chip(text, tone = '', glyph) {
 }
 
 function groupLabel(group) {
-  if (!group) return chip('未分组');
-  const name = group.title || '未命名分组';
+  if (!group) return chip(t('ungrouped'));
+  const name = group.title || t('untitledGroup');
   const label = element('span', 'group-label', element('span', 'group-dot'), element('span', 'ellipsis', name));
   label.title = name;
   label.dataset.color = group.color ?? 'grey';
@@ -94,7 +115,7 @@ function announce(message) {
 
 async function send(type, fields = {}) {
   const response = await chrome.runtime.sendMessage({ type, currentWindowId: windowId, ...fields });
-  if (!response?.ok) throw new Error(response?.error ?? '后台服务无响应');
+  if (!response?.ok) throw new Error(response?.error ?? t('noBgResponse'));
   return response.data;
 }
 
@@ -106,7 +127,7 @@ async function act(type, fields, feedback) {
     if (feedback) announce(feedback(result));
     await refresh();
   } catch (error) {
-    announce(`操作失败 · ${error.message}`);
+    announce(t('actionFailed', { error: error.message }));
   } finally {
     busy = false;
   }
@@ -118,11 +139,13 @@ async function refresh() {
     const next = await send('GET_STATE');
     if (revision !== request) return;
     state = next;
+    lang = resolveLanguage(state.settings?.language, browserLang);
+    applyChromeCopy();
     render();
   } catch (error) {
     if (revision !== request) return;
-    if (!state) main.replaceChildren(empty('window', '无法读取标签页', '重新打开 TabTidy 后再试。'));
-    else announce(`刷新失败 · ${error.message}`);
+    if (!state) main.replaceChildren(empty('window', t('readFailedTitle'), t('readFailedHint')));
+    else announce(t('refreshFailed', { error: error.message }));
   } finally {
     if (revision === request) main.setAttribute('aria-busy', 'false');
   }
@@ -135,7 +158,7 @@ function queueRefresh() {
 
 function windowNames() {
   return Object.fromEntries(orderedWindows().map((window, index) => [
-    window.id, window.id === state.currentWindowId ? '当前窗口' : `窗口 ${index + 1}`,
+    window.id, window.id === state.currentWindowId ? t('currentWindow') : t('windowIndex', { index: index + 1 }),
   ]));
 }
 
@@ -146,7 +169,7 @@ function orderedWindows() {
 }
 
 function readableUrl(url) {
-  if (!url) return '新标签页';
+  if (!url) return t('newTab');
   try {
     const parsed = new URL(url);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
@@ -174,15 +197,15 @@ function favicon(url) {
   return node;
 }
 
-const protections = {
-  pinned: '已固定', audible: '正在播放声音', 'tab-lock': '标签页已锁定',
-  'group-lock': '分组已锁定', 'window-lock': '窗口已锁定',
-  whitelist: '白名单保护', internal: '浏览器内部页面', paused: '自动整理已暂停',
-  'min-tabs': '已达到最少标签页数量', navigating: '正在打开页面',
+const protectionKeys = {
+  pinned: 'protectPinned', audible: 'protectAudible', 'tab-lock': 'protectTabLock',
+  'group-lock': 'protectGroupLock', 'window-lock': 'protectWindowLock',
+  whitelist: 'protectWhitelist', internal: 'protectInternal', paused: 'protectPaused',
+  'min-tabs': 'protectMinTabs', navigating: 'protectNavigating',
 };
 
 function countdown(ms) {
-  if (ms === 0) return '待整理';
+  if (ms === 0) return t('countdownDue');
   if (ms < 60 * 60_000) return `${Math.ceil(ms / 60_000)}m`;
   if (ms < 24 * 60 * 60_000) return `${Math.ceil(ms / (60 * 60_000))}h`;
   return `${Math.ceil(ms / (24 * 60 * 60_000))}d`;
@@ -191,50 +214,52 @@ function countdown(ms) {
 function tabStatus(tab, copies) {
   const policy = state.countdowns[tab.id];
   let status;
-  if (tab.active) status = chip('活跃', 'tone-accent');
-  else if (lockReason(tab, state.locks)) status = chip('锁定', 'tone-accent', 'lock');
-  else if (tab.discarded) status = chip('已休眠', '', 'sleep');
-  else if (tab.pinned) status = chip('固定', '', 'pin');
+  if (tab.active) status = chip(t('statusActive'), 'tone-accent');
+  else if (lockReason(tab, state.locks)) status = chip(t('statusLocked'), 'tone-accent', 'lock');
+  else if (tab.discarded) status = chip(t('statusSleeping'), '', 'sleep');
+  else if (tab.pinned) status = chip(t('statusPinned'), '', 'pin');
   else if (policy?.remainingMs != null) status = chip(countdown(policy.remainingMs));
 
   if (status) {
-    const action = policy?.nextAction === 'sleep' ? '休眠' : '关闭';
-    status.title = protections[policy?.protectionReason] ?? (
-      policy?.nextAction ? `自动${action} · ${countdown(policy.remainingMs)}` : status.textContent
+    const protectionKey = protectionKeys[policy?.protectionReason];
+    status.title = protectionKey ? t(protectionKey) : (
+      policy?.nextAction
+        ? t(policy.nextAction === 'sleep' ? 'autoSleepHint' : 'autoCloseHint', { time: countdown(policy.remainingMs) })
+        : status.textContent
     );
   }
   return element('span', 'row-status', status, copies && chip(`×${copies}`, 'tone-warning'));
 }
 
 function lockButton(scope, id, locked, owningWindowId, classes = '') {
-  const noun = { tab: '标签页', group: '分组', window: '窗口' }[scope];
+  const noun = t({ tab: 'nounTab', group: 'nounGroup', window: 'nounWindow' }[scope]);
   return button({
-    label: `${locked ? '解锁' : '锁定'}${noun}`, glyph: locked ? 'lock' : 'unlock',
+    label: t(locked ? 'unlockTarget' : 'lockTarget', { noun }), glyph: locked ? 'lock' : 'unlock',
     classes: `icon-button ${locked ? 'is-locked' : ''} ${classes}`,
     key: `lock-${scope}-${id}`,
     run: () => act('TOGGLE_LOCK', { scope, id, windowId: owningWindowId },
-      result => `已${result.locked ? '锁定' : '解锁'}${noun}`),
+      result => t(result.locked ? 'toastLocked' : 'toastUnlocked', { noun })),
   });
 }
 
-const sleepFeedback = ({ sleptCount }) => sleptCount ? `已休眠 ${sleptCount} 个标签页` : '没有可休眠的标签页';
-const dedupeFeedback = ({ closedCount }) => closedCount ? `已去重 ${closedCount} 个标签页，可从回收站恢复` : '没有可关闭的重复标签页';
+const sleepFeedback = ({ sleptCount }) => sleptCount ? t('toastSlept', { count: sleptCount }) : t('toastNoneSlept');
+const dedupeFeedback = ({ closedCount }) => closedCount ? t('toastDeduped', { count: closedCount }) : t('toastNoneDeduped');
 
 async function jumpToTab(id) {
   try {
     await send('FOCUS_TAB', { id });
   } catch (error) {
-    announce(`切换失败 · ${error.message}`);
+    announce(t('jumpFailed', { error: error.message }));
   }
 }
 
 function tabRow(tab, { copies, meta, status, actions = true } = {}) {
-  const title = tab.title || tab.url || '新标签页';
+  const title = tab.title || tab.url || t('newTab');
   const titleNode = element('span', 'row-title ellipsis', title);
   titleNode.title = title;
   const subtitle = element('span', 'row-subtitle ellipsis', readableUrl(tab.url));
   subtitle.title = tab.url ?? '';
-  const open = button({ classes: 'row-main', key: `focus-${tab.id}`, label: `切换到 ${title}`, run: () => jumpToTab(tab.id) });
+  const open = button({ classes: 'row-main', key: `focus-${tab.id}`, label: t('switchToTab', { title }), run: () => jumpToTab(tab.id) });
   open.append(favicon(tab.favIconUrl), element('span', 'row-text', titleNode, subtitle, meta),
     status ?? tabStatus(tab, copies));
   const row = element('div', `row ${tab.active ? 'is-active' : ''} ${actions ? 'has-actions' : ''}`, open);
@@ -242,21 +267,25 @@ function tabRow(tab, { copies, meta, status, actions = true } = {}) {
     row.append(element('div', 'row-actions',
       lockButton('tab', tab.id, state.locks.lockedTabIds.includes(tab.id), tab.windowId),
       !tab.active && !tab.discarded ? button({
-        label: '休眠标签页', glyph: 'sleep', classes: 'icon-button', key: `sleep-${tab.id}`,
+        label: t('sleepTab'), glyph: 'sleep', classes: 'icon-button', key: `sleep-${tab.id}`,
         run: () => act('SLEEP_TAB', { id: tab.id }, sleepFeedback),
       }) : null,
       button({
-        label: '关闭标签页', glyph: 'close', classes: 'icon-button danger', key: `close-${tab.id}`,
+        label: t('closeTab'), glyph: 'close', classes: 'icon-button danger', key: `close-${tab.id}`,
         run: () => act('CLOSE_TAB', { id: tab.id }, result =>
-          result.archived ? '已关闭，可从回收站恢复' : result.closed ? '已关闭空白标签页' : '标签页已变化，请重试'),
+          result.archived ? t('toastClosedArchived') : result.closed ? t('toastClosedBlank') : t('toastClosedChanged')),
       }),
     ));
   }
   return row;
 }
 
+function disclosureKey(key, searching) {
+  return searching ? `search-${key}` : key;
+}
+
 function toggleSection(key, defaultOpen, searching, label, ...content) {
-  const preference = searching ? `search-${key}` : key;
+  const preference = disclosureKey(key, searching);
   const expanded = disclosure.get(preference) ?? defaultOpen;
   const toggle = button({ classes: 'disclosure', key: `toggle-${key}`, label,
     run: () => { disclosure.set(preference, !expanded); renderMain(); } });
@@ -271,7 +300,7 @@ function empty(glyph, title, hint) {
 }
 
 function filterTab(tab, query) {
-  return [tab.title, tab.url, state.tabGroups[tab.groupId]?.title || (isGrouped(tab) ? '未命名分组' : '未分组')]
+  return [tab.title, tab.url, state.tabGroups[tab.groupId]?.title || (isGrouped(tab) ? t('untitledGroup') : t('ungrouped'))]
     .some(value => value?.toLowerCase().includes(query));
 }
 
@@ -279,7 +308,7 @@ function renderGroup(groupId, rows, row, query) {
   const group = state.tabGroups[groupId] ?? { color: 'grey', windowId: rows[0].windowId };
   const key = `group-${groupId}`;
   const [expanded, toggle] = toggleSection(key, Boolean(query) || !group.collapsed, Boolean(query),
-    group.title || '未命名分组', groupLabel(group), element('span', 'count', String(rows.length)));
+    group.title || t('untitledGroup'), groupLabel(group), element('span', 'count', String(rows.length)));
   const locked = state.locks.lockedGroupIds.includes(groupId) ||
     state.locks.lockedGroupKeys.includes(groupKey(group.windowId, groupId));
   const list = element('div', 'group-rows', ...(expanded ? rows.map(row) : []));
@@ -289,7 +318,7 @@ function renderGroup(groupId, rows, row, query) {
   return element('section', '',
     element('div', 'group-head', toggle,
       button({
-        label: '休眠本组', glyph: 'sleep', classes: 'icon-button group-action', key: `sleep-${key}`,
+        label: t('sleepGroup'), glyph: 'sleep', classes: 'icon-button group-action', key: `sleep-${key}`,
         run: () => act('SLEEP_GROUP', { id: groupId }, sleepFeedback),
       }),
       lockButton('group', groupId, locked, group.windowId, 'group-action'),
@@ -297,15 +326,11 @@ function renderGroup(groupId, rows, row, query) {
   );
 }
 
-function disclosureKey(key, searching) {
-  return searching ? `search-${key}` : key;
-}
-
 function renderTabs(query, duplicates) {
   const nodes = [];
   if (duplicates) nodes.push(element('div', 'duplicate-strip',
-    element('span', '', icon('duplicate'), `${duplicates} 个重复标签页`),
-    button({ text: `一键去重 (${duplicates})`, classes: 'button', key: 'quick-dedupe', run: () => act('DEDUPE_ALL', {}, dedupeFeedback) }),
+    element('span', '', icon('duplicate'), t('dupBannerCount', { count: duplicates })),
+    button({ text: t('quickDedupe', { count: duplicates }), classes: 'button', key: 'quick-dedupe', run: () => act('DEDUPE_ALL', {}, dedupeFeedback) }),
   ));
 
   const searching = Boolean(query);
@@ -331,12 +356,12 @@ function renderTabs(query, duplicates) {
           ?? (searching || !state.tabGroups[groupId]?.collapsed));
     });
     const summary = totalGroups
-      ? `${visibleWindows.length} 个窗口 · ${totalGroups} 个分组`
-      : `${visibleWindows.length} 个窗口`;
+      ? t('summaryWindowsGroups', { windows: visibleWindows.length, groups: totalGroups })
+      : t('summaryWindows', { windows: visibleWindows.length });
     nodes.push(element('div', 'tabs-toolbar',
       element('span', '', summary),
       button({
-        text: allExpanded ? '全部收起' : '全部展开',
+        text: allExpanded ? t('collapseAll') : t('expandAll'),
         glyph: allExpanded ? 'collapseAll' : 'expandAll',
         classes: 'button subtle',
         key: 'toggle-all-windows',
@@ -378,88 +403,96 @@ function renderTabs(query, duplicates) {
           groups.get(tab.groupId).push(tab);
         }
       }
-      if (pinned.length) body.append(element('section', '', element('h2', 'section-label', icon('pin'), '已固定'), ...pinned.map(row)));
+      if (pinned.length) body.append(element('section', '', element('h2', 'section-label', icon('pin'), t('pinnedSection')), ...pinned.map(row)));
       for (const [id, rows] of groups) body.append(renderGroup(id, rows, row, query));
-      if (ungrouped.length) body.append(element('section', '', element('h2', 'section-label', '未分组'), ...ungrouped.map(row)));
+      if (ungrouped.length) body.append(element('section', '', element('h2', 'section-label', t('ungrouped')), ...ungrouped.map(row)));
     }
     nodes.push(element('section', 'window', element('div', 'window-head', toggle,
       lockButton('window', window.id, state.locks.lockedWindowIds.includes(window.id), window.id),
     ), body));
   }
   if (!visibleWindows.length) nodes.push(query
-    ? empty('search', '没有匹配的标签页', '试试网址、分组名或更短的关键词。')
-    : empty('window', '暂无打开的标签页', '打开网页后，标签页会按窗口显示在这里。'));
+    ? empty('search', t('emptySearchTitle'), t('emptySearchHint'))
+    : empty('window', t('emptyTabsTitle'), t('emptyTabsHint')));
   return nodes;
 }
 
 function renderDuplicates(count) {
-  if (!count) return [empty('duplicate', '没有重复标签页', '打开相同网址时，重复项会显示在这里。')];
+  if (!count) return [empty('duplicate', t('emptyDupTitle'), t('emptyDupHint'))];
   const names = windowNames();
   const header = element('div', 'view-toolbar',
-    element('p', '', `共发现 ${state.duplicateGroups.length} 组、${count} 个多余标签`),
-    button({ text: '一键全部去重', classes: 'button primary', key: 'all-dedupe', run: () => act('DEDUPE_ALL', {}, dedupeFeedback) }),
+    element('p', '', t('dupSummary', { groups: state.duplicateGroups.length, count })),
+    button({ text: t('dedupeAllBtn'), classes: 'button primary', key: 'all-dedupe', run: () => act('DEDUPE_ALL', {}, dedupeFeedback) }),
   );
   return [header, ...state.duplicateGroups.map(group => {
     const url = element('h2', 'cluster-url ellipsis', group.url);
     url.title = group.url;
     return element('section', 'cluster', element('div', 'cluster-head', url, button({
-      text: '去重', label: `为 ${group.url} 去重`, classes: 'button', key: `dedupe-${group.url}`,
+      text: t('dedupeOneBtn'), label: t('dedupeOneLabel', { url: group.url }), classes: 'button', key: `dedupe-${group.url}`,
       run: () => act('DEDUPE_GROUP', { url: group.url }, dedupeFeedback),
     })), ...group.tabs.map(tab => tabRow(tab, {
       actions: false,
-      meta: element('span', 'row-meta', groupLabel(state.tabGroups[tab.groupId]), chip(names[tab.windowId] ?? '其他窗口')),
-      status: tab.id === group.keeperId ? chip('保留', 'tone-good') : chip('将关闭'),
+      meta: element('span', 'row-meta', groupLabel(state.tabGroups[tab.groupId]), chip(names[tab.windowId] ?? t('otherWindow'))),
+      status: tab.id === group.keeperId ? chip(t('keepTag'), 'tone-good') : chip(t('closeTag')),
     })));
   })];
 }
 
 function relativeTime(timestamp) {
+  const formatter = relativeFormatters[lang] ?? relativeFormatters.en;
   const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
-  if (minutes === 0) return '刚刚';
-  if (minutes < 60) return relative.format(-minutes, 'minute');
-  if (minutes < 1440) return relative.format(-Math.floor(minutes / 60), 'hour');
-  return relative.format(-Math.floor(minutes / 1440), 'day');
+  if (minutes === 0) return t('justNow');
+  if (minutes < 60) return formatter.format(-minutes, 'minute');
+  if (minutes < 1440) return formatter.format(-Math.floor(minutes / 60), 'hour');
+  return formatter.format(-Math.floor(minutes / 1440), 'day');
 }
 
 function renderCorral(query) {
   const count = state.corral.length;
-  if (!count) return [empty('archive', '回收站是空的', 'TabTidy 关闭的标签页会保存到这里，点击即可恢复。')];
+  if (!count) return [empty('archive', t('emptyCorralTitle'), t('emptyCorralHint'))];
   const clear = confirmClear ? element('div', 'confirm-actions', button({
-    text: '取消', classes: 'button', key: 'cancel-clear', run: () => { confirmClear = false; renderMain(); },
+    text: t('cancel'), classes: 'button', key: 'cancel-clear', run: () => { confirmClear = false; renderMain(); },
   }), button({
-    text: '确认清空', classes: 'button danger', key: 'confirm-clear',
-    run: () => { confirmClear = false; act('CLEAR_CORRAL', {}, () => '已清空回收站'); },
+    text: t('confirmClear'), classes: 'button danger', key: 'confirm-clear',
+    run: () => { confirmClear = false; act('CLEAR_CORRAL', {}, () => t('toastClearedCorral')); },
   })) : button({
-    text: '清空回收站', classes: 'button', key: 'clear',
+    text: t('clearCorral'), classes: 'button', key: 'clear',
     run: () => { confirmClear = true; renderMain(); main.querySelector('[data-focus-key="cancel-clear"]')?.focus(); },
   });
-  const toolbar = element('div', 'view-toolbar', confirmClear ? '永久删除这些记录？' : `${count} 条记录`, clear);
+  const toolbar = element('div', 'view-toolbar', confirmClear ? t('confirmClearPrompt') : t('corralCount', { count }), clear);
   const filtered = searchCorral(state.corral, query);
-  const reasons = { auto: '自动收起', duplicate: '去重', manual: '手动关闭' };
-  if (!filtered.length) return [toolbar, empty('search', '没有匹配的回收记录', '试试网址、原分组名或更短的关键词。')];
+  const reasonKeys = { auto: 'reasonAuto', duplicate: 'reasonDuplicate', manual: 'reasonManual' };
+  if (!filtered.length) return [toolbar, empty('search', t('emptyCorralSearchTitle'), t('emptyCorralSearchHint'))];
   return [toolbar, element('section', 'corral-list', ...filtered.map(item => {
     const title = item.title || item.url;
     const restore = button({
-      label: `恢复 ${title}`, classes: 'row-main', key: `restore-${item.id}`,
-      run: () => act('RESTORE_CORRAL_ITEM', { id: item.id }, () => '已恢复标签页'),
+      label: t('restoreLabel', { title }), classes: 'row-main', key: `restore-${item.id}`,
+      run: () => act('RESTORE_CORRAL_ITEM', { id: item.id }, () => t('toastRestored')),
     });
     const group = item.groupTitle != null || item.groupColor != null
       ? groupLabel({ title: item.groupTitle, color: item.groupColor }) : null;
     restore.append(favicon(item.favIconUrl), element('span', 'row-text',
       element('span', 'row-title ellipsis', title), element('span', 'row-subtitle ellipsis', readableUrl(item.url)),
-      element('span', 'row-meta', group, chip(reasons[item.reason] ?? '已关闭'), chip(relativeTime(item.closedAt))),
+      element('span', 'row-meta', group, chip(t(reasonKeys[item.reason] ?? 'reasonClosed')), chip(relativeTime(item.closedAt))),
     ), icon('restore'));
     return element('div', 'row', restore, element('div', 'row-actions', button({
-      label: `永久删除 ${title}`, glyph: 'close', classes: 'icon-button danger', key: `delete-${item.id}`,
-      run: () => act('DELETE_CORRAL_ITEM', { id: item.id }, () => '已移除记录'),
+      label: t('deleteLabel', { title }), glyph: 'close', classes: 'icon-button danger', key: `delete-${item.id}`,
+      run: () => act('DELETE_CORRAL_ITEM', { id: item.id }, () => t('toastDeleted')),
     })));
   }))];
 }
 
-function setting(name, title, hint, { unit, min = 1, multiline = false } = {}) {
-  const field = element(multiline ? 'textarea' : 'input');
+function setting(name, title, hint, { unit, min = 1, multiline = false, options = null } = {}) {
+  const field = element(options ? 'select' : multiline ? 'textarea' : 'input');
   field.id = name;
-  if (multiline) {
+  field.dataset.focusKey = `setting-${name}`;
+  if (options) {
+    for (const [value, text] of options) {
+      const opt = element('option', '', text);
+      opt.value = value;
+      field.append(opt);
+    }
+  } else if (multiline) {
     field.rows = 3;
     field.placeholder = 'localhost';
     field.spellcheck = false;
@@ -482,13 +515,18 @@ function setting(name, title, hint, { unit, min = 1, multiline = false } = {}) {
       field.value = state.settings[name];
       return;
     }
-    const value = multiline ? field.value.split('\n') : unit ? Number(field.value) : field.checked;
+    const value = options ? field.value : multiline ? field.value.split('\n') : unit ? Number(field.value) : field.checked;
     pendingSettings.add(name);
     try {
       state.settings = (await send('UPDATE_SETTINGS', { settings: { [name]: value } })).settings;
-      announce('已保存');
+      if (name === 'language') {
+        lang = resolveLanguage(state.settings.language, browserLang);
+        applyChromeCopy();
+        render();
+      }
+      announce(t('saved'));
     } catch (error) {
-      announce(`保存失败 · ${error.message}`);
+      announce(t('saveFailed', { error: error.message }));
     } finally {
       pendingSettings.delete(name);
       syncSettings(true);
@@ -507,32 +545,37 @@ function settingsCard(title, ...fields) {
 
 function renderSettings() {
   return [
-    settingsCard('普通标签页',
-      setting('ungroupedSleepMinutes', '闲置后自动休眠', '释放内存，标签页仍留在窗口；设为 0 可关闭。', { unit: '分钟', min: 0 }),
-      setting('ungroupedCloseMinutes', '闲置后自动关闭', '超过此时间后，从窗口收起到回收站。', { unit: '分钟' })),
-    settingsCard('分组标签页',
-      setting('groupedSleepMinutes', '闲置后自动休眠', '释放内存，标签页仍留在原分组。', { unit: '分钟' }),
-      setting('groupedSleepOnly', '分组内标签页仅休眠', '开启后，分组中的标签页不会因闲置而关闭。'),
-      setting('groupedCloseHours', '闲置后自动关闭', '超过此时间后移入回收站，恢复时保留分组信息。', { unit: '小时' })),
-    settingsCard('重复标签页',
-      setting('autoDedupeOnOpen', '打开重复页面时自动跳转', '转到已有页面，并将新打开的副本移入回收站。'),
-      setting('ignoreHash', '忽略 # 锚点', '将同页的不同位置视为重复，适合飞书文档等。'),
-      setting('ignoreQuery', '忽略 ? 查询参数', '同一页面带有不同查询参数时也视为重复。')),
-    settingsCard('安全护栏',
-      setting('minOpenTabs', '至少保留的标签页', '合计所有常规 Chrome 窗口中的标签页，包括固定标签页。', { unit: '个', min: 0 }),
-      setting('whitelistDomains', '白名单域名', '每行一个域名或网址关键词，例如 localhost。', { multiline: true })),
+    settingsCard(t('cardGeneral'),
+      setting('language', t('settingLanguage'), t('settingLanguageHint'), {
+        options: [['auto', t('langAuto')], ['zh', t('langZh')], ['en', t('langEn')]],
+      })),
+    settingsCard(t('cardUngrouped'),
+      setting('ungroupedSleepMinutes', t('settingUngroupedSleep'), t('settingUngroupedSleepHint'), { unit: t('unitMinutes'), min: 0 }),
+      setting('ungroupedCloseMinutes', t('settingUngroupedClose'), t('settingUngroupedCloseHint'), { unit: t('unitMinutes') })),
+    settingsCard(t('cardGrouped'),
+      setting('groupedSleepMinutes', t('settingGroupedSleep'), t('settingGroupedSleepHint'), { unit: t('unitMinutes') }),
+      setting('groupedSleepOnly', t('settingGroupedSleepOnly'), t('settingGroupedSleepOnlyHint')),
+      setting('groupedCloseHours', t('settingGroupedClose'), t('settingGroupedCloseHint'), { unit: t('unitHours') })),
+    settingsCard(t('cardDuplicates'),
+      setting('autoDedupeOnOpen', t('settingAutoDedupe'), t('settingAutoDedupeHint')),
+      setting('ignoreHash', t('settingIgnoreHash'), t('settingIgnoreHashHint')),
+      setting('ignoreQuery', t('settingIgnoreQuery'), t('settingIgnoreQueryHint'))),
+    settingsCard(t('cardGuardrails'),
+      setting('minOpenTabs', t('settingMinOpenTabs'), t('settingMinOpenTabsHint'), { unit: t('unitTabs'), min: 0 }),
+      setting('whitelistDomains', t('settingWhitelist'), t('settingWhitelistHint'), { multiline: true })),
   ];
 }
 
 function syncSettings(force = false) {
   if (view !== 'settings') return;
-  for (const field of main.querySelectorAll('input, textarea')) {
+  for (const field of main.querySelectorAll('input, textarea, select')) {
     if (pendingSettings.has(field.id) || (!force && document.activeElement === field)) continue;
     const value = state.settings[field.id];
     if (field.type === 'checkbox') field.checked = value;
     else field.value = Array.isArray(value) ? value.join('\n') : String(value);
   }
-  $('groupedCloseHours').disabled = state.settings.groupedSleepOnly;
+  const groupedClose = $('groupedCloseHours');
+  if (groupedClose) groupedClose.disabled = state.settings.groupedSleepOnly;
 }
 
 function duplicateCount() {
@@ -549,7 +592,7 @@ function keepFocus(container, nodes) {
 function renderMain() {
   if (!state) return;
   const query = search.value.trim().toLowerCase();
-  if (view === 'settings' && main.dataset.view === view) {
+  if (view === 'settings' && main.dataset.view === view && main.dataset.lang === lang) {
     syncSettings();
     return;
   }
@@ -559,35 +602,38 @@ function renderMain() {
   }[view]();
   keepFocus(main, nodes);
   main.dataset.view = view;
-  main.setAttribute('aria-label', views[view]);
-  if (view === 'settings') syncSettings();
+  main.dataset.lang = lang;
+  main.setAttribute('aria-label', t(viewKeys[view]));
+  if (view === 'settings') syncSettings(true);
 }
 
 function render() {
   const paused = state.settings.paused;
-  $('open-count').textContent = `${state.tabs.length} 个标签页`;
+  $('open-count').textContent = t('openCount', { count: state.tabs.length });
   for (const [id, count] of [['duplicate-count', duplicateCount()], ['corral-count', state.corral.length]]) {
     $(id).hidden = id === 'duplicate-count' && count === 0;
     $(id).textContent = count;
   }
-  if ($('header-actions').dataset.paused !== String(paused)) {
+  const headerKey = `${paused}:${lang}`;
+  if ($('header-actions').dataset.state !== headerKey) {
     keepFocus($('header-actions'), [
       button({
-        text: paused ? '已暂停' : '暂停', label: paused ? '恢复自动整理' : '暂停自动整理',
+        text: paused ? t('paused') : t('pause'), label: paused ? t('resumeLabel') : t('pauseLabel'),
         glyph: paused ? 'play' : 'pause', classes: `button ${paused ? 'is-paused' : ''}`, key: 'pause',
-        run: () => act('UPDATE_SETTINGS', { settings: { paused: !paused } }, () => paused ? '已恢复自动整理' : '已暂停自动整理'),
+        run: () => act('UPDATE_SETTINGS', { settings: { paused: !paused } }, () => paused ? t('toastResumed') : t('toastPaused')),
       }),
       button({
-        text: '立即整理', label: '立即检查闲置标签页，按设置休眠或移入回收站',
+        text: t('sweep'), label: t('sweepLabel'),
         glyph: 'sparkle', classes: 'button primary', key: 'sweep', disabled: paused,
-        run: () => act('RUN_SWEEP_NOW', {}, ({ sleptCount, closedCount }) => `已休眠 ${sleptCount} 个，已收起 ${closedCount} 个`),
+        run: () => act('RUN_SWEEP_NOW', {}, ({ sleptCount, closedCount }) => t('toastSweep', { slept: sleptCount, closed: closedCount })),
       }),
     ]);
-    $('header-actions').dataset.paused = String(paused);
+    $('header-actions').dataset.state = headerKey;
   }
   renderMain();
 }
 
+applyChromeCopy();
 $('search-box').prepend(icon('search'));
 search.addEventListener('input', renderMain);
 $('navigation').addEventListener('click', event => {

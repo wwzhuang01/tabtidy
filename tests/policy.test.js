@@ -95,9 +95,11 @@ test('missing timestamps begin at now and configured limits change thresholds', 
 
 test('sanitizes storage settings and normalizes whitelist input', () => {
   const settings = sanitizeSettings({
-    ungroupedSleepMinutes: 0, groupedCloseHours: -1, minOpenTabs: 0, ignoreHash: 'false', unknown: true,
+    language: 'en', ungroupedSleepMinutes: 0, groupedCloseHours: -1, minOpenTabs: 0, ignoreHash: 'false', unknown: true,
     whitelistDomains: [' LocalHost ', 'localhost', null, '  ', 'example.com'],
   });
+  assert.equal(settings.language, 'en');
+  assert.equal(sanitizeSettings({ language: 'fr' }).language, 'auto');
   assert.equal(settings.ungroupedSleepMinutes, 0);
   assert.equal(sanitizeSettings({ ungroupedSleepMinutes: -1 }).ungroupedSleepMinutes, 15);
   assert.equal(settings.groupedCloseHours, 24);

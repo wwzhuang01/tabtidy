@@ -1,7 +1,13 @@
 import { addCorralItem } from './core/corral.js';
+import { resolveLanguage, translate } from './core/i18n.js';
 import { EMPTY_LOCKS, groupKey, isGrouped, lockReason } from './core/locks.js';
 import { evaluateTab, isInternalPage, matchesWhitelist, sanitizeSettings } from './core/policy.js';
 import { duplicateKey, findDuplicateGroups, pickKeeperTab } from './core/url.js';
+
+function bgError(settings, key) {
+  const browserLang = chrome.i18n?.getUILanguage?.() ?? '';
+  return new Error(translate(resolveLanguage(settings?.language, browserLang), key));
+}
 
 const SWEEP_ALARM = 'tabtidy-sweep';
 const OPEN_GUARD_MS = 30_000;
@@ -268,10 +274,10 @@ async function interceptDuplicate(id, at) {
 }
 
 async function restoreItem(id, currentWindowId) {
-  const { corral } = await readStore();
+  const { corral, settings } = await readStore();
   const item = corral.find(entry => entry.id === id);
-  if (!item) throw new Error('这条记录已移除');
-  if (/^javascript:/i.test(item.url)) throw new Error('Chrome 无法恢复此网址');
+  if (!item) throw bgError(settings, 'errCorralMissing');
+  if (/^javascript:/i.test(item.url)) throw bgError(settings, 'errCannotRestore');
   const current = Number.isInteger(currentWindowId)
     ? await chrome.windows.get(currentWindowId).catch(() => null)
     : null;
@@ -303,9 +309,9 @@ async function restoreItem(id, currentWindowId) {
 }
 
 async function toggleLock(scope, id, windowId) {
+  const { locks, settings } = await readStore();
   const key = { tab: 'lockedTabIds', group: 'lockedGroupIds', window: 'lockedWindowIds' }[scope];
-  if (!key || !Number.isInteger(id)) throw new Error('无效的锁定目标');
-  const { locks } = await readStore();
+  if (!key || !Number.isInteger(id)) throw bgError(settings, 'errInvalidLock');
   const legacyKey = groupKey(windowId, id);
   const wasLocked = locks[key].includes(id) || (scope === 'group' && locks.lockedGroupKeys.includes(legacyKey));
   locks[key] = wasLocked ? locks[key].filter(value => value !== id) : [...locks[key], id];
@@ -337,7 +343,10 @@ async function handleMessage(message) {
     }
     case 'DEDUPE_ALL': return dedupe(currentWindowId);
     case 'DEDUPE_GROUP':
-      if (typeof message.url !== 'string') throw new Error('缺少要去重的网址');
+      if (typeof message.url !== 'string') {
+        const { settings } = await readStore();
+        throw bgError(settings, 'errMissingUrl');
+      }
       return dedupe(currentWindowId, message.url);
     case 'TOGGLE_LOCK': return toggleLock(message.scope, id, message.windowId);
     case 'RESTORE_CORRAL_ITEM': return restoreItem(id, currentWindowId);
@@ -354,7 +363,10 @@ async function handleMessage(message) {
       await chrome.storage.local.set({ settings });
       return { settings };
     }
-    default: throw new Error('未知操作');
+    default: {
+      const { settings } = await readStore();
+      throw bgError(settings, 'errUnknownAction');
+    }
   }
 }
 

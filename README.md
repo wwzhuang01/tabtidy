@@ -38,7 +38,7 @@ Built for heavy Chrome users who organize work with **Chrome Tab Groups** and wa
   - **Grouped tabs**: Auto-sleep after **30 min** (stays neatly in its Tab Group while freeing RAM), auto-close after **24 hours** — or toggle **Sleep-only for grouped tabs** to never auto-close grouped work.
 - **Group-Aware Corral Recovery**: Every tab closed by TabTidy (auto-idle, dedupe, or manual close) is saved locally (up to 500 items) with its original **Tab Group name and color**. Clicking to restore automatically puts it back into a matching open group or recreates the group.
 - **Built-In Safety Guardrails**: Never auto-sleeps or closes active tabs, pinned tabs, audible tabs (meetings/music), manually locked tabs/groups/windows, whitelisted domains, or internal Chrome pages; respects a configurable minimum open tab floor.
-- **Adaptive Light & Dark UI**: Automatically follows your system/Chrome appearance, built specifically for narrow Side Panel widths (320px+).
+- **Adaptive Light & Dark UI + Bilingual (EN / 中文)**: Automatically follows your system/Chrome appearance and browser language, with an instant language switcher (`Auto` / `简体中文` / `English`) in Settings. Built specifically for narrow Side Panel widths (320px+).
 
 ## How It Works
 

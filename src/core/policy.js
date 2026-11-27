@@ -1,8 +1,10 @@
+import { LANGUAGES } from './i18n.js';
 import { isGrouped, lockReason } from './locks.js';
 
 const MINUTE = 60_000;
 export const DEFAULT_SETTINGS = Object.freeze({
   paused: false,
+  language: 'auto',
   ungroupedSleepMinutes: 15,
   ungroupedCloseMinutes: 60,
   groupedSleepMinutes: 30,
@@ -19,6 +21,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
 export function sanitizeSettings(settings = {}) {
   return Object.fromEntries(Object.entries(DEFAULT_SETTINGS).map(([key, fallback]) => {
     const value = settings[key];
+    if (key === 'language') {
+      return [key, LANGUAGES.includes(value) ? value : fallback];
+    }
     if (key === 'whitelistDomains') {
       return [key, Array.isArray(value)
         ? [...new Set(value.filter(pattern => typeof pattern === 'string').map(pattern => pattern.trim().toLowerCase()).filter(Boolean))]
